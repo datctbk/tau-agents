@@ -425,6 +425,9 @@ class AgentToolExtension(Extension):
                     events = []
                     sub_name = persona or "default"
                     streaming_text = False
+                    # Pause the CLI spinner for the entire sub-agent run
+                    # to prevent braille characters interleaving with streamed text.
+                    self._ext_context.pause_spinner()
                     for event in sub.prompt(assigned_task):
                         events.append(event)
                         if isinstance(event, TextDelta) and not getattr(event, "is_thinking", False):
@@ -448,6 +451,8 @@ class AgentToolExtension(Extension):
                             self._ext_context.print(f"[red]  └─ 🤖 {sub_name} ❌ {getattr(event, 'message', 'Error')}[/red]")
                     if streaming_text:
                         self._ext_context.print("")  # final newline
+                    # Resume spinner after sub-agent streaming is done
+                    self._ext_context.resume_spinner()
 
                 # Extract assistant text from the LAST turn only.
                 # Previous turns contain intermediate reasoning that clutters
@@ -489,6 +494,7 @@ class AgentToolExtension(Extension):
                     self._task_registry.update(target_task_id, status="completed", result=result)
                 return result
             except Exception as e:
+                self._ext_context.resume_spinner()
                 err_msg = f"Sub-agent execution failed: {e}"
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="failed", error=err_msg)
