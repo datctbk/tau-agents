@@ -429,16 +429,33 @@ class AgentToolExtension(Extension):
                     if streaming_text:
                         self._ext_context.print("")  # final newline
 
-                # Extract assistant text from events
+                # Extract assistant text from the LAST turn only.
+                # Previous turns contain intermediate reasoning that clutters
+                # the result.  We split on TurnComplete boundaries and keep
+                # only the final segment.
                 text_parts: list[str] = []
+                last_turn_parts: list[str] = []
+                last_error: str | None = None
                 for event in events:
                     if isinstance(event, TextDelta) and not getattr(event, "is_thinking", False):
-                        text_parts.append(event.text)
+                        last_turn_parts.append(event.text)
+                    elif type(event).__name__ == "TurnComplete":
+                        # A turn boundary — snapshot what we have so far
+                        if last_turn_parts:
+                            text_parts = last_turn_parts
+                            last_turn_parts = []
                     elif isinstance(event, ErrorEvent):
-                        err_msg = f"Sub-agent error: {event.message}"
-                        if target_task_id:
-                            self._task_registry.update(target_task_id, status="failed", error=err_msg)
-                        return err_msg
+                        last_error = f"Sub-agent error: {event.message}"
+
+                # If there are leftover parts after the last TurnComplete (or
+                # no TurnComplete was emitted), prefer those.
+                if last_turn_parts:
+                    text_parts = last_turn_parts
+
+                if last_error:
+                    if target_task_id:
+                        self._task_registry.update(target_task_id, status="failed", error=last_error)
+                    return last_error
 
                 result = "".join(text_parts).strip()
                 if not result:
