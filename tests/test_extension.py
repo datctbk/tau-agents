@@ -1,0 +1,339 @@
+"""Tests for the AgentToolExtension — tools, slash commands, and handlers."""
+
+import json
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# Ensure tau and the extension are importable
+ROOT = Path(__file__).resolve().parent.parent
+TAU_ROOT = ROOT.parent / "tau"
+sys.path.insert(0, str(TAU_ROOT))
+
+import importlib.util
+
+_mod_name = "_tau_ext_agent_tool_ext"
+_spec = importlib.util.spec_from_file_location(
+    _mod_name,
+    str(ROOT / "extensions" / "agent_tool" / "extension.py"),
+)
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules[_mod_name] = _mod
+_spec.loader.exec_module(_mod)
+
+AgentToolExtension = _mod.AgentToolExtension
+AgentPersona = _mod.AgentPersona
+
+from tau.core.types import TextDelta, ErrorEvent
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ext():
+    """Fresh extension instance with mocked context."""
+    e = AgentToolExtension()
+    ctx = MagicMock()
+    ctx.print = MagicMock()
+    ctx.enqueue = MagicMock()
+    ctx.create_sub_session = MagicMock()
+    e._ext_context = ctx
+    e._personas = {
+        "explore": AgentPersona(
+            name="explore",
+            description="Read-only explorer",
+            system_prompt="You are a research agent.",
+            max_turns=15,
+        ),
+        "plan": AgentPersona(
+            name="plan",
+            description="Planning agent",
+            system_prompt="You are a planning agent.",
+            max_turns=8,
+        ),
+    }
+    return e
+
+
+@pytest.fixture
+def ctx_mock():
+    """Standalone mocked ExtensionContext."""
+    ctx = MagicMock()
+    ctx.print = MagicMock()
+    ctx.enqueue = MagicMock()
+    return ctx
+
+
+# ---------------------------------------------------------------------------
+# Extension metadata
+# ---------------------------------------------------------------------------
+
+class TestExtensionManifest:
+    def test_manifest_name(self):
+        ext = AgentToolExtension()
+        assert ext.manifest.name == "agent_tool"
+
+    def test_manifest_version(self):
+        ext = AgentToolExtension()
+        assert ext.manifest.version == "0.1.0"
+
+
+# ---------------------------------------------------------------------------
+# Tools registration
+# ---------------------------------------------------------------------------
+
+class TestToolsRegistration:
+    def test_registers_four_tools(self, ext):
+        tools = ext.tools()
+        assert len(tools) == 4
+
+    def test_tool_names(self, ext):
+        names = {t.name for t in ext.tools()}
+        assert names == {"agent", "send_message", "task_create", "task_stop"}
+
+    def test_agent_tool_has_required_params(self, ext):
+        agent_tool = next(t for t in ext.tools() if t.name == "agent")
+        assert "task" in agent_tool.parameters
+        assert agent_tool.parameters["task"].required is True
+
+    def test_agent_tool_has_optional_params(self, ext):
+        agent_tool = next(t for t in ext.tools() if t.name == "agent")
+        assert agent_tool.parameters["persona"].required is False
+        assert agent_tool.parameters["system_prompt"].required is False
+        assert agent_tool.parameters["max_turns"].required is False
+
+    def test_tools_have_handlers(self, ext):
+        for tool in ext.tools():
+            assert callable(tool.handler), f"Tool {tool.name} has no callable handler"
+
+
+# ---------------------------------------------------------------------------
+# Slash commands
+# ---------------------------------------------------------------------------
+
+class TestSlashCommands:
+    def test_registers_two_commands(self, ext):
+        cmds = ext.slash_commands()
+        assert len(cmds) == 2
+
+    def test_command_names(self, ext):
+        names = {c.name for c in ext.slash_commands()}
+        assert names == {"agents", "tasks"}
+
+    def test_handle_agents_returns_true(self, ext, ctx_mock):
+        assert ext.handle_slash("agents", "", ctx_mock) is True
+
+    def test_handle_tasks_returns_true(self, ext, ctx_mock):
+        assert ext.handle_slash("tasks", "", ctx_mock) is True
+
+    def test_handle_unknown_returns_false(self, ext, ctx_mock):
+        assert ext.handle_slash("unknown", "", ctx_mock) is False
+
+    def test_show_agents_prints_personas(self, ext, ctx_mock):
+        ext.handle_slash("agents", "", ctx_mock)
+        output = ctx_mock.print.call_args[0][0]
+        assert "explore" in output
+        assert "plan" in output
+
+    def test_show_tasks_empty(self, ext, ctx_mock):
+        ext.handle_slash("tasks", "", ctx_mock)
+        output = ctx_mock.print.call_args[0][0]
+        assert "No tasks" in output
+
+
+# ---------------------------------------------------------------------------
+# Agent tool handler
+# ---------------------------------------------------------------------------
+
+class TestAgentHandler:
+    def test_error_when_no_context(self):
+        ext = AgentToolExtension()
+        ext._ext_context = None
+        result = ext._handle_agent(task="test")
+        assert "Error" in result
+        assert "not initialized" in result
+
+    def test_unknown_persona_error(self, ext):
+        result = ext._handle_agent(task="test", persona="nonexistent")
+        assert "Error" in result
+        assert "Unknown persona" in result
+        assert "nonexistent" in result
+
+    def test_persona_resolves_system_prompt(self, ext):
+        # Mock the sub-session
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt_sync.return_value = [
+            TextDelta(text="Research complete."),
+        ]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        result = ext._handle_agent(task="find todos", persona="explore")
+
+        # Verify create_sub_session was called with explore's prompt
+        call_kwargs = ext._ext_context.create_sub_session.call_args[1]
+        assert call_kwargs["system_prompt"] == "You are a research agent."
+        assert call_kwargs["max_turns"] == 15
+        assert "Research complete." in result
+
+    def test_custom_system_prompt_overrides_persona(self, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt_sync.return_value = [TextDelta(text="ok")]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        ext._handle_agent(
+            task="test",
+            persona="explore",
+            system_prompt="Custom prompt!",
+        )
+
+        call_kwargs = ext._ext_context.create_sub_session.call_args[1]
+        assert call_kwargs["system_prompt"] == "Custom prompt!"
+
+    def test_default_prompt_when_no_persona(self, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt_sync.return_value = [TextDelta(text="done")]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        ext._handle_agent(task="generic task")
+
+        call_kwargs = ext._ext_context.create_sub_session.call_args[1]
+        assert "sub-agent" in call_kwargs["system_prompt"].lower()
+
+    def test_error_event_from_subagent(self, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt_sync.return_value = [
+            ErrorEvent(message="model failed"),
+        ]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        result = ext._handle_agent(task="fail")
+        assert "Sub-agent error" in result
+        assert "model failed" in result
+
+    def test_empty_response(self, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt_sync.return_value = []
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        result = ext._handle_agent(task="nothing")
+        assert "no text output" in result.lower()
+
+    def test_truncation_of_long_result(self, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt_sync.return_value = [
+            TextDelta(text="A" * 10000),
+        ]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        result = ext._handle_agent(task="verbose")
+        assert len(result) < 10000
+        assert "truncated" in result
+
+    def test_spawn_exception_handled(self, ext):
+        ext._ext_context.create_sub_session.side_effect = RuntimeError("no provider")
+        result = ext._handle_agent(task="test")
+        assert "Error spawning sub-agent" in result
+
+    def test_execution_exception_handled(self, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt_sync.side_effect = Exception("timeout")
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        result = ext._handle_agent(task="crash")
+        assert "execution failed" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# SendMessage handler
+# ---------------------------------------------------------------------------
+
+class TestSendMessageHandler:
+    def test_enqueues_message(self, ext):
+        result = ext._handle_send_message(message="hello world")
+        ext._ext_context.enqueue.assert_called_once_with("hello world")
+        assert "enqueued" in result.lower()
+
+    def test_error_without_context(self):
+        ext = AgentToolExtension()
+        ext._ext_context = None
+        result = ext._handle_send_message(message="test")
+        assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
+# Task handlers
+# ---------------------------------------------------------------------------
+
+class TestTaskHandlers:
+    def test_task_create_returns_json(self, ext):
+        result = ext._handle_task_create(name="my task")
+        data = json.loads(result)
+        assert data["name"] == "my task"
+        assert data["status"] == "pending"
+        assert "id" in data
+
+    def test_task_stop_existing(self, ext):
+        create_result = ext._handle_task_create(name="stoppable")
+        task_id = json.loads(create_result)["id"]
+        result = ext._handle_task_stop(task_id=task_id)
+        assert "stopped" in result.lower()
+
+    def test_task_stop_nonexistent(self, ext):
+        result = ext._handle_task_stop(task_id="fake-id")
+        assert "Error" in result
+        assert "not found" in result.lower()
+
+    def test_task_lifecycle(self, ext):
+        """Create → stop → verify status in /tasks output."""
+        create_result = ext._handle_task_create(name="lifecycle test")
+        task_id = json.loads(create_result)["id"]
+
+        # Task should appear in listing
+        tasks_before = ext._task_registry.list_all()
+        assert any(t.id == task_id for t in tasks_before)
+
+        # Stop it
+        ext._handle_task_stop(task_id=task_id)
+
+        # Verify state
+        task = ext._task_registry.get(task_id)
+        assert task.status == "stopped"
+        assert task.completed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# on_load
+# ---------------------------------------------------------------------------
+
+class TestOnLoad:
+    def test_on_load_stores_context(self):
+        ext = AgentToolExtension()
+        ctx = MagicMock()
+        ext.on_load(ctx)
+        assert ext._ext_context is ctx
+
+    def test_on_load_loads_personas(self):
+        ext = AgentToolExtension()
+        ctx = MagicMock()
+        ext.on_load(ctx)
+        # Should have loaded at least the 3 built-in personas
+        assert len(ext._personas) >= 3
+        assert "explore" in ext._personas
