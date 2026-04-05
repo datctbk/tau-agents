@@ -115,6 +115,7 @@ class AgentPersona:
     system_prompt: str
     allowed_tools: list[str] | None = None   # None = all tools
     max_turns: int = 10
+    max_tool_result_chars: int = 0            # 0 = unlimited
 
 
 def _load_built_in_agents() -> dict[str, AgentPersona]:
@@ -132,6 +133,7 @@ def _load_built_in_agents() -> dict[str, AgentPersona]:
             description = ""
             max_turns = 10
             allowed_tools: list[str] | None = None
+            max_tool_result_chars = 0
             body_lines: list[str] = []
             in_frontmatter = False
             past_frontmatter = False
@@ -154,6 +156,11 @@ def _load_built_in_agents() -> dict[str, AgentPersona]:
                         raw = line.split(":", 1)[1].strip()
                         if raw.startswith("[") and raw.endswith("]"):
                             allowed_tools = [t.strip().strip('"').strip("'") for t in raw[1:-1].split(",") if t.strip()]
+                    elif line.startswith("max_tool_result_chars:"):
+                        try:
+                            max_tool_result_chars = int(line.split(":", 1)[1].strip())
+                        except ValueError:
+                            pass
                 else:
                     body_lines.append(line)
 
@@ -165,6 +172,7 @@ def _load_built_in_agents() -> dict[str, AgentPersona]:
                     system_prompt=system_prompt,
                     allowed_tools=allowed_tools,
                     max_turns=max_turns,
+                    max_tool_result_chars=max_tool_result_chars,
                 )
         except Exception as e:
             logger.warning("Failed to load agent persona %s: %s", md_file.name, e)
@@ -376,6 +384,7 @@ class AgentToolExtension(Extension):
         resolved_prompt = system_prompt
         resolved_max_turns = max_turns or 10
         resolved_allowed_tools: list[str] | None = None
+        resolved_max_tool_result_chars = 0
 
         if resolved_prompt is None and persona:
             agent_persona = self._personas.get(persona)
@@ -386,6 +395,7 @@ class AgentToolExtension(Extension):
             if max_turns is None:
                 resolved_max_turns = agent_persona.max_turns
             resolved_allowed_tools = agent_persona.allowed_tools
+            resolved_max_tool_result_chars = agent_persona.max_tool_result_chars
 
         if resolved_prompt is None:
             resolved_prompt = (
@@ -401,6 +411,7 @@ class AgentToolExtension(Extension):
                 max_turns=resolved_max_turns,
                 session_name=f"sub-agent:{persona or 'default'}",
                 allowed_tools=resolved_allowed_tools,
+                max_tool_result_chars=resolved_max_tool_result_chars,
             )
         except Exception as e:
             return f"Error spawning sub-agent: {e}"
