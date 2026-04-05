@@ -404,16 +404,30 @@ class AgentToolExtension(Extension):
                 with sub:
                     events = []
                     sub_name = persona or "default"
+                    streaming_text = False
                     for event in sub.prompt(assigned_task):
                         events.append(event)
-                        if type(event).__name__ == "ToolCallEvent":
+                        if isinstance(event, TextDelta) and not getattr(event, "is_thinking", False):
+                            if not streaming_text:
+                                self._ext_context.print(f"[dim]  └─ 🤖 {sub_name}:[/dim] ", end="")
+                                streaming_text = True
+                            self._ext_context.print(event.text, end="")
+                        elif type(event).__name__ == "ToolCallEvent":
+                            if streaming_text:
+                                self._ext_context.print("")  # newline after streamed text
+                                streaming_text = False
                             if hasattr(event, "call"):
                                 tool_name = getattr(event.call, "name", "unknown")
                             else:
                                 tool_name = "unknown"
                             self._ext_context.print(f"[dim]  └─ 🤖 {sub_name} 🛠️ {tool_name}[/dim]")
                         elif type(event).__name__ == "ErrorEvent":
+                            if streaming_text:
+                                self._ext_context.print("")
+                                streaming_text = False
                             self._ext_context.print(f"[red]  └─ 🤖 {sub_name} ❌ {getattr(event, 'message', 'Error')}[/red]")
+                    if streaming_text:
+                        self._ext_context.print("")  # final newline
 
                 # Extract assistant text from events
                 text_parts: list[str] = []
