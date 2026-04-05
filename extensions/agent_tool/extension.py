@@ -417,47 +417,37 @@ class AgentToolExtension(Extension):
             return f"Error spawning sub-agent: {e}"
 
         def _run_sub_agent(assigned_task: str, target_task_id: str | None) -> str:
+            from rich.panel import Panel
+            from rich.markdown import Markdown
+
             try:
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="running")
-                
+
+                sub_name = persona or "default"
+                turn_num = 0
+
                 with sub:
                     events = []
-                    sub_name = persona or "default"
-                    streaming_text = False
-                    # Pause the CLI spinner for the entire sub-agent run
-                    # to prevent braille characters interleaving with streamed text.
-                    self._ext_context.pause_spinner()
+                    # Show a header line for the sub-agent
+                    self._ext_context.print(f"[dim]  └─ 🤖 {sub_name}:[/dim]")
                     for event in sub.prompt(assigned_task):
                         events.append(event)
-                        if isinstance(event, TextDelta) and not getattr(event, "is_thinking", False):
-                            if not streaming_text:
-                                self._ext_context.print(f"[dim]  └─ 🤖 {sub_name}:[/dim] ", end="")
-                                streaming_text = True
-                            self._ext_context.print(event.text, end="")
-                        elif type(event).__name__ == "ToolCallEvent":
-                            if streaming_text:
-                                self._ext_context.print("")  # newline after streamed text
-                                streaming_text = False
+                        # Only print tool-call and error status lines;
+                        # text is buffered and rendered in a Panel at the end.
+                        if type(event).__name__ == "ToolCallEvent":
                             if hasattr(event, "call"):
                                 tool_name = getattr(event.call, "name", "unknown")
                             else:
                                 tool_name = "unknown"
-                            self._ext_context.print(f"[dim]  └─ 🤖 {sub_name} 🛠️ {tool_name}[/dim]")
+                            self._ext_context.print(f"[dim]  │  🛠️  {tool_name}[/dim]")
+                        elif type(event).__name__ == "TurnComplete":
+                            turn_num += 1
+                            self._ext_context.print(f"[dim]  │  ── turn {turn_num} ──[/dim]")
                         elif type(event).__name__ == "ErrorEvent":
-                            if streaming_text:
-                                self._ext_context.print("")
-                                streaming_text = False
-                            self._ext_context.print(f"[red]  └─ 🤖 {sub_name} ❌ {getattr(event, 'message', 'Error')}[/red]")
-                    if streaming_text:
-                        self._ext_context.print("")  # final newline
-                    # Resume spinner after sub-agent streaming is done
-                    self._ext_context.resume_spinner()
+                            self._ext_context.print(f"[red]  │  ❌ {getattr(event, 'message', 'Error')}[/red]")
 
                 # Extract assistant text from the LAST turn only.
-                # Previous turns contain intermediate reasoning that clutters
-                # the result.  We split on TurnComplete boundaries and keep
-                # only the final segment.
                 text_parts: list[str] = []
                 last_turn_parts: list[str] = []
                 last_error: str | None = None
@@ -465,15 +455,12 @@ class AgentToolExtension(Extension):
                     if isinstance(event, TextDelta) and not getattr(event, "is_thinking", False):
                         last_turn_parts.append(event.text)
                     elif type(event).__name__ == "TurnComplete":
-                        # A turn boundary — snapshot what we have so far
                         if last_turn_parts:
                             text_parts = last_turn_parts
                             last_turn_parts = []
                     elif isinstance(event, ErrorEvent):
                         last_error = f"Sub-agent error: {event.message}"
 
-                # If there are leftover parts after the last TurnComplete (or
-                # no TurnComplete was emitted), prefer those.
                 if last_turn_parts:
                     text_parts = last_turn_parts
 
@@ -485,16 +472,32 @@ class AgentToolExtension(Extension):
                 result = "".join(text_parts).strip()
                 if not result:
                     result = "(Sub-agent returned no text output.)"
-                
+
                 # Truncate very long results to avoid context explosion
                 if len(result) > 8000:
                     result = result[:8000] + "\n\n... (truncated — full output was {:,} chars)".format(len(result))
-                
+
+                # Render the final result in a bordered Panel
+                try:
+                    panel = Panel(
+                        Markdown(result),
+                        title=f"🤖 {sub_name}",
+                        title_align="left",
+                        border_style="dim cyan",
+                        padding=(1, 2),
+                    )
+                    self._ext_context.print(panel)
+                except Exception:
+                    # Fallback to plain text if Panel rendering fails
+                    sep = "─" * 40
+                    self._ext_context.print(f"[dim]── 🤖 {sub_name} ──[/dim]")
+                    self._ext_context.print(result)
+                    self._ext_context.print(f"[dim]{sep}[/dim]")
+
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="completed", result=result)
                 return result
             except Exception as e:
-                self._ext_context.resume_spinner()
                 err_msg = f"Sub-agent execution failed: {e}"
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="failed", error=err_msg)
