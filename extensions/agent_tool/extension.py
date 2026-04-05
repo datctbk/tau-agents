@@ -131,6 +131,7 @@ def _load_built_in_agents() -> dict[str, AgentPersona]:
             name = md_file.stem
             description = ""
             max_turns = 10
+            allowed_tools: list[str] | None = None
             body_lines: list[str] = []
             in_frontmatter = False
             past_frontmatter = False
@@ -149,6 +150,10 @@ def _load_built_in_agents() -> dict[str, AgentPersona]:
                             max_turns = int(line.split(":", 1)[1].strip())
                         except ValueError:
                             pass
+                    elif line.startswith("allowed_tools:"):
+                        raw = line.split(":", 1)[1].strip()
+                        if raw.startswith("[") and raw.endswith("]"):
+                            allowed_tools = [t.strip().strip('"').strip("'") for t in raw[1:-1].split(",") if t.strip()]
                 else:
                     body_lines.append(line)
 
@@ -158,6 +163,7 @@ def _load_built_in_agents() -> dict[str, AgentPersona]:
                     name=name,
                     description=description or name,
                     system_prompt=system_prompt,
+                    allowed_tools=allowed_tools,
                     max_turns=max_turns,
                 )
         except Exception as e:
@@ -369,6 +375,7 @@ class AgentToolExtension(Extension):
         # Resolve system prompt
         resolved_prompt = system_prompt
         resolved_max_turns = max_turns or 10
+        resolved_allowed_tools: list[str] | None = None
 
         if resolved_prompt is None and persona:
             agent_persona = self._personas.get(persona)
@@ -378,6 +385,7 @@ class AgentToolExtension(Extension):
             resolved_prompt = agent_persona.system_prompt
             if max_turns is None:
                 resolved_max_turns = agent_persona.max_turns
+            resolved_allowed_tools = agent_persona.allowed_tools
 
         if resolved_prompt is None:
             resolved_prompt = (
@@ -392,6 +400,7 @@ class AgentToolExtension(Extension):
                 system_prompt=resolved_prompt,
                 max_turns=resolved_max_turns,
                 session_name=f"sub-agent:{persona or 'default'}",
+                allowed_tools=resolved_allowed_tools,
             )
         except Exception as e:
             return f"Error spawning sub-agent: {e}"
