@@ -425,27 +425,9 @@ class AgentToolExtension(Extension):
                     self._task_registry.update(target_task_id, status="running")
 
                 sub_name = persona or "default"
-                turn_num = 0
 
                 with sub:
-                    events = []
-                    # Show a header line for the sub-agent
-                    self._ext_context.print(f"[dim]  └─ 🤖 {sub_name}:[/dim]")
-                    for event in sub.prompt(assigned_task):
-                        events.append(event)
-                        # Only print tool-call and error status lines;
-                        # text is buffered and rendered in a Panel at the end.
-                        if type(event).__name__ == "ToolCallEvent":
-                            if hasattr(event, "call"):
-                                tool_name = getattr(event.call, "name", "unknown")
-                            else:
-                                tool_name = "unknown"
-                            self._ext_context.print(f"[dim]  │  🛠️  {tool_name}[/dim]")
-                        elif type(event).__name__ == "TurnComplete":
-                            turn_num += 1
-                            self._ext_context.print(f"[dim]  │  ── turn {turn_num} ──[/dim]")
-                        elif type(event).__name__ == "ErrorEvent":
-                            self._ext_context.print(f"[red]  │  ❌ {getattr(event, 'message', 'Error')}[/red]")
+                    events = list(sub.prompt(assigned_task))
 
                 # Extract assistant text from the LAST turn only.
                 text_parts: list[str] = []
@@ -488,7 +470,6 @@ class AgentToolExtension(Extension):
                     )
                     self._ext_context.print(panel)
                 except Exception:
-                    # Fallback to plain text if Panel rendering fails
                     sep = "─" * 40
                     self._ext_context.print(f"[dim]── 🤖 {sub_name} ──[/dim]")
                     self._ext_context.print(result)
