@@ -407,9 +407,13 @@ class AgentToolExtension(Extension):
                     for event in sub.prompt(assigned_task):
                         events.append(event)
                         if type(event).__name__ == "ToolCallEvent":
-                            self._ext_context.print(f"[dim]  └─ \\[sub-agent:{sub_name}\\] 🛠️ {getattr(event, 'name', 'tool')}[/dim]")
+                            if hasattr(event, "call"):
+                                tool_name = getattr(event.call, "name", "unknown")
+                            else:
+                                tool_name = "unknown"
+                            self._ext_context.print(f"[dim]  └─ 🤖 {sub_name} 🛠️ {tool_name}[/dim]")
                         elif type(event).__name__ == "ErrorEvent":
-                            self._ext_context.print(f"[red]  └─ \\[sub-agent:{sub_name}\\] ❌ Agent error: {getattr(event, 'message', '')}[/red]")
+                            self._ext_context.print(f"[red]  └─ 🤖 {sub_name} ❌ {getattr(event, 'message', 'Error')}[/red]")
 
                 # Extract assistant text from events
                 text_parts: list[str] = []
