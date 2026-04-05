@@ -459,22 +459,6 @@ class AgentToolExtension(Extension):
                 if len(result) > 8000:
                     result = result[:8000] + "\n\n... (truncated — full output was {:,} chars)".format(len(result))
 
-                # Render the final result in a bordered Panel
-                try:
-                    panel = Panel(
-                        Markdown(result),
-                        title=f"🤖 {sub_name}",
-                        title_align="left",
-                        border_style="dim cyan",
-                        padding=(1, 2),
-                    )
-                    self._ext_context.print(panel)
-                except Exception:
-                    sep = "─" * 40
-                    self._ext_context.print(f"[dim]── 🤖 {sub_name} ──[/dim]")
-                    self._ext_context.print(result)
-                    self._ext_context.print(f"[dim]{sep}[/dim]")
-
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="completed", result=result)
                 return result
