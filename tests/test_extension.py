@@ -87,13 +87,13 @@ class TestExtensionManifest:
 # ---------------------------------------------------------------------------
 
 class TestToolsRegistration:
-    def test_registers_four_tools(self, ext):
+    def test_registers_tools(self, ext):
         tools = ext.tools()
-        assert len(tools) == 4
+        assert len(tools) == 7
 
     def test_tool_names(self, ext):
         names = {t.name for t in ext.tools()}
-        assert names == {"agent", "send_message", "task_create", "task_stop"}
+        assert names == {"agent", "send_message", "task_create", "task_stop", "task_list", "task_get", "task_update"}
 
     def test_agent_tool_has_required_params(self, ext):
         agent_tool = next(t for t in ext.tools() if t.name == "agent")
@@ -105,6 +105,7 @@ class TestToolsRegistration:
         assert agent_tool.parameters["persona"].required is False
         assert agent_tool.parameters["system_prompt"].required is False
         assert agent_tool.parameters["max_turns"].required is False
+        assert agent_tool.parameters["background"].required is False
 
     def test_tools_have_handlers(self, ext):
         for tool in ext.tools():
@@ -168,7 +169,7 @@ class TestAgentHandler:
         mock_session = MagicMock()
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.prompt_sync.return_value = [
+        mock_session.prompt.return_value = [
             TextDelta(text="Research complete."),
         ]
         ext._ext_context.create_sub_session.return_value = mock_session
@@ -185,7 +186,7 @@ class TestAgentHandler:
         mock_session = MagicMock()
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.prompt_sync.return_value = [TextDelta(text="ok")]
+        mock_session.prompt.return_value = [TextDelta(text="ok")]
         ext._ext_context.create_sub_session.return_value = mock_session
 
         ext._handle_agent(
@@ -201,7 +202,7 @@ class TestAgentHandler:
         mock_session = MagicMock()
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.prompt_sync.return_value = [TextDelta(text="done")]
+        mock_session.prompt.return_value = [TextDelta(text="done")]
         ext._ext_context.create_sub_session.return_value = mock_session
 
         ext._handle_agent(task="generic task")
@@ -213,7 +214,7 @@ class TestAgentHandler:
         mock_session = MagicMock()
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.prompt_sync.return_value = [
+        mock_session.prompt.return_value = [
             ErrorEvent(message="model failed"),
         ]
         ext._ext_context.create_sub_session.return_value = mock_session
@@ -226,7 +227,7 @@ class TestAgentHandler:
         mock_session = MagicMock()
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.prompt_sync.return_value = []
+        mock_session.prompt.return_value = []
         ext._ext_context.create_sub_session.return_value = mock_session
 
         result = ext._handle_agent(task="nothing")
@@ -236,7 +237,7 @@ class TestAgentHandler:
         mock_session = MagicMock()
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.prompt_sync.return_value = [
+        mock_session.prompt.return_value = [
             TextDelta(text="A" * 10000),
         ]
         ext._ext_context.create_sub_session.return_value = mock_session
@@ -254,11 +255,25 @@ class TestAgentHandler:
         mock_session = MagicMock()
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.prompt_sync.side_effect = Exception("timeout")
+        mock_session.prompt.side_effect = Exception("timeout")
         ext._ext_context.create_sub_session.return_value = mock_session
 
         result = ext._handle_agent(task="crash")
         assert "execution failed" in result.lower()
+
+    @patch("threading.Thread")
+    def test_background_agent_handled(self, mock_thread, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt.return_value = [TextDelta("ok")]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        result = ext._handle_agent(task="test", background=True)
+        assert "spawned in background" in result
+        assert "Task ID:" in result
+        mock_thread.assert_called_once()
+        mock_thread.return_value.start.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +332,43 @@ class TestTaskHandlers:
         task = ext._task_registry.get(task_id)
         assert task.status == "stopped"
         assert task.completed_at is not None
+
+    def test_task_list_empty(self, ext):
+        assert "No tasks" in ext._handle_task_list()
+
+    def test_task_list_filled(self, ext):
+        ext._handle_task_create(name="foo")
+        ext._handle_task_create(name="bar")
+        result = ext._handle_task_list()
+        data = json.loads(result)
+        assert len(data) == 2
+        assert data[0]["name"] == "foo"
+
+    def test_task_get_success(self, ext):
+        task_id = json.loads(ext._handle_task_create("foo"))["id"]
+        data = json.loads(ext._handle_task_get(task_id))
+        assert data["id"] == task_id
+        assert data["name"] == "foo"
+
+    def test_task_get_fail(self, ext):
+        assert "Error" in ext._handle_task_get("bad-id")
+
+    def test_task_update(self, ext):
+        task_id = json.loads(ext._handle_task_create("foo"))["id"]
+        
+        # update status
+        result = ext._handle_task_update(task_id, status="running")
+        assert "updated" in result.lower()
+        t = ext._task_registry.get(task_id)
+        assert t.status == "running"
+        assert t.completed_at is None
+        
+        # update result
+        ext._handle_task_update(task_id, result="done stuff", status="completed")
+        t = ext._task_registry.get(task_id)
+        assert t.status == "completed"
+        assert t.result == "done stuff"
+        assert t.completed_at is not None
 
 
 # ---------------------------------------------------------------------------

@@ -230,6 +230,15 @@ class AgentToolExtension(Extension):
                         description="Maximum number of agent turns (default: 10).",
                         required=False,
                     ),
+                    "background": ToolParameter(
+                        type="boolean",
+                        description=(
+                            "If true, spawn the agent asynchronously and return a task_id immediately. "
+                            "You can check on the agent later with task_get. "
+                            "If false (default), block until the agent completes and return its full text response."
+                        ),
+                        required=False,
+                    ),
                 },
                 handler=self._handle_agent,
             ),
@@ -270,6 +279,49 @@ class AgentToolExtension(Extension):
                 },
                 handler=self._handle_task_stop,
             ),
+            ToolDefinition(
+                name="task_list",
+                description="List all currently tracked background tasks and their statuses.",
+                parameters={},
+                handler=self._handle_task_list,
+            ),
+            ToolDefinition(
+                name="task_get",
+                description="Get detailed information about a specific task, including output or errors.",
+                parameters={
+                    "task_id": ToolParameter(
+                        type="string",
+                        description="The ID of the task to retrieve.",
+                    ),
+                },
+                handler=self._handle_task_get,
+            ),
+            ToolDefinition(
+                name="task_update",
+                description="Update a task's status, result, or error message manually.",
+                parameters={
+                    "task_id": ToolParameter(
+                        type="string",
+                        description="The ID of the task to update.",
+                    ),
+                    "status": ToolParameter(
+                        type="string",
+                        description="Optional new status (e.g. running, completed, failed, stopped).",
+                        required=False,
+                    ),
+                    "result": ToolParameter(
+                        type="string",
+                        description="Optional result string to attach to the task output.",
+                        required=False,
+                    ),
+                    "error": ToolParameter(
+                        type="string",
+                        description="Optional error string to attach if the task failed.",
+                        required=False,
+                    ),
+                },
+                handler=self._handle_task_update,
+            ),
         ]
 
     # ------------------------------------------------------------------
@@ -309,6 +361,7 @@ class AgentToolExtension(Extension):
         persona: str | None = None,
         system_prompt: str | None = None,
         max_turns: int | None = None,
+        background: bool = False,
     ) -> str:
         if self._ext_context is None:
             return "Error: AgentTool extension context not initialized."
@@ -343,31 +396,71 @@ class AgentToolExtension(Extension):
         except Exception as e:
             return f"Error spawning sub-agent: {e}"
 
-        # Run the sub-agent and collect its response
-        try:
-            with sub:
-                events = sub.prompt_sync(task)
+        def _run_sub_agent(assigned_task: str, target_task_id: str | None) -> str:
+            try:
+                if target_task_id:
+                    self._task_registry.update(target_task_id, status="running")
+                
+                with sub:
+                    events = []
+                    sub_name = persona or "default"
+                    for event in sub.prompt(assigned_task):
+                        events.append(event)
+                        if type(event).__name__ == "ToolCallEvent":
+                            self._ext_context.print(f"[dim]  └─ \\[sub-agent:{sub_name}\\] 🛠️ {getattr(event, 'name', 'tool')}[/dim]")
+                        elif type(event).__name__ == "ErrorEvent":
+                            self._ext_context.print(f"[red]  └─ \\[sub-agent:{sub_name}\\] ❌ Agent error: {getattr(event, 'message', '')}[/red]")
 
-            # Extract assistant text from events
-            text_parts: list[str] = []
-            for event in events:
-                if isinstance(event, TextDelta) and not getattr(event, "is_thinking", False):
-                    text_parts.append(event.text)
-                elif isinstance(event, ErrorEvent):
-                    return f"Sub-agent error: {event.message}"
+                # Extract assistant text from events
+                text_parts: list[str] = []
+                for event in events:
+                    if isinstance(event, TextDelta) and not getattr(event, "is_thinking", False):
+                        text_parts.append(event.text)
+                    elif isinstance(event, ErrorEvent):
+                        err_msg = f"Sub-agent error: {event.message}"
+                        if target_task_id:
+                            self._task_registry.update(target_task_id, status="failed", error=err_msg)
+                        return err_msg
 
-            result = "".join(text_parts).strip()
-            if not result:
-                return "(Sub-agent returned no text output.)"
+                result = "".join(text_parts).strip()
+                if not result:
+                    result = "(Sub-agent returned no text output.)"
+                
+                # Truncate very long results to avoid context explosion
+                if len(result) > 8000:
+                    result = result[:8000] + "\n\n... (truncated — full output was {:,} chars)".format(len(result))
+                
+                if target_task_id:
+                    self._task_registry.update(target_task_id, status="completed", result=result)
+                return result
+            except Exception as e:
+                err_msg = f"Sub-agent execution failed: {e}"
+                if target_task_id:
+                    self._task_registry.update(target_task_id, status="failed", error=err_msg)
+                return err_msg
 
-            # Truncate very long results to avoid context explosion
-            if len(result) > 8000:
-                result = result[:8000] + "\n\n... (truncated — full output was {:,} chars)".format(len(result))
-
-            return result
-
-        except Exception as e:
-            return f"Sub-agent execution failed: {e}"
+        if background:
+            task_name = f"Sub-agent ({persona or 'default'}): {task[:30]}..."
+            tentry = self._task_registry.create(task_name)
+            
+            # Start background thread
+            t = threading.Thread(
+                target=_run_sub_agent, 
+                args=(task, tentry.id), 
+                name=f"SubAgentThread-{tentry.id}"
+            )
+            t.daemon = True
+            t.start()
+            
+            return (
+                f"Agent spawned in background.\n"
+                f"Task ID: {tentry.id}\n"
+                f"Name: {tentry.name}\n"
+                f"Use 'task_get' with this ID to check its status."
+            )
+        else:
+            # Synchronous execution
+            return _run_sub_agent(task, None)
 
     def _handle_send_message(self, message: str) -> str:
         if self._ext_context is None:
@@ -384,6 +477,47 @@ class AgentToolExtension(Extension):
             task = self._task_registry.get(task_id)
             return f"Task {task_id} stopped." + (f" ({task.name})" if task else "")
         return f"Error: Task '{task_id}' not found."
+
+    def _handle_task_list(self) -> str:
+        tasks = self._task_registry.list_all()
+        if not tasks:
+            return "No tasks tracked."
+        return json.dumps([t.to_dict() for t in tasks], indent=2)
+
+    def _handle_task_get(self, task_id: str) -> str:
+        task = self._task_registry.get(task_id)
+        if not task:
+            return f"Error: Task '{task_id}' not found."
+        return json.dumps(task.to_dict(), indent=2)
+
+    def _handle_task_update(
+        self,
+        task_id: str,
+        status: str | None = None,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> str:
+        task = self._task_registry.get(task_id)
+        if not task:
+            return f"Error: Task '{task_id}' not found."
+            
+        kwargs: dict[str, Any] = {}
+        if status is not None:
+            kwargs["status"] = status
+            if status in ("completed", "failed", "stopped"):
+                kwargs["completed_at"] = time.time()
+        if result is not None:
+            kwargs["result"] = result
+        if error is not None:
+            kwargs["error"] = error
+            
+        if not kwargs:
+            return f"No fields updated for task '{task_id}'."
+            
+        self._task_registry.update(task_id, **kwargs)
+        # re-fetch to get updated state
+        updated = self._task_registry.get(task_id)
+        return f"Task {task_id} updated:\n" + json.dumps(getattr(updated, "to_dict", lambda: {})(), indent=2)
 
     # ------------------------------------------------------------------
     # Slash command display
