@@ -487,11 +487,13 @@ class AgentToolExtension(Extension):
 
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="completed", result=result)
+                self._ext_context.set_spinner("")
                 return result
             except Exception as e:
                 err_msg = f"Sub-agent execution failed: {e}"
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="failed", error=err_msg)
+                self._ext_context.set_spinner("")
                 return err_msg
 
         if background:
