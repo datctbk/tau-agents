@@ -417,17 +417,43 @@ class AgentToolExtension(Extension):
             return f"Error spawning sub-agent: {e}"
 
         def _run_sub_agent(assigned_task: str, target_task_id: str | None) -> str:
-            from rich.panel import Panel
-            from rich.markdown import Markdown
-
             try:
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="running")
 
                 sub_name = persona or "default"
+                tool_count = 0
+                turn_count = 0
+                last_tool = ""
+                start_time = time.time()
+
+                def _progress_msg() -> str:
+                    elapsed = int(time.time() - start_time)
+                    parts = [f"🤖 {sub_name}"]
+                    if turn_count:
+                        parts.append(f"turn {turn_count}")
+                    if last_tool:
+                        parts.append(f"🛠️ {last_tool}")
+                    if tool_count:
+                        parts.append(f"{tool_count} tools")
+                    parts.append(f"{elapsed}s")
+                    return " | ".join(parts)
+
+                self._ext_context.set_spinner(_progress_msg())
 
                 with sub:
-                    events = list(sub.prompt(assigned_task))
+                    events = []
+                    for event in sub.prompt(assigned_task):
+                        events.append(event)
+                        if type(event).__name__ == "ToolCallEvent":
+                            tool_count += 1
+                            if hasattr(event, "call"):
+                                last_tool = getattr(event.call, "name", "")
+                            self._ext_context.set_spinner(_progress_msg())
+                        elif type(event).__name__ == "TurnComplete":
+                            turn_count += 1
+                            last_tool = ""
+                            self._ext_context.set_spinner(_progress_msg())
 
                 # Extract assistant text from the LAST turn only.
                 text_parts: list[str] = []
