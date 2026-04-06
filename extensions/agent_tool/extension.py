@@ -425,7 +425,7 @@ class AgentToolExtension(Extension):
 
                 sub_name = persona or "default"
                 tool_count = 0
-                turn_count = 0
+                turn_count = 1
                 last_tool = ""
                 start_time = time.time()
 
@@ -452,9 +452,13 @@ class AgentToolExtension(Extension):
                             if hasattr(event, "call"):
                                 last_tool = getattr(event.call, "name", "")
                             self._ext_context.set_spinner(_progress_msg(), key=agent_key)
-                        elif type(event).__name__ == "TurnComplete":
+                        elif type(event).__name__ == "ToolResultEvent":
+                            # Each tool result means the model will do another
+                            # LLM round-trip, so count it as a new turn.
                             turn_count += 1
                             last_tool = ""
+                            self._ext_context.set_spinner(_progress_msg(), key=agent_key)
+                        elif type(event).__name__ == "TurnComplete":
                             self._ext_context.set_spinner(_progress_msg(), key=agent_key)
 
                 # Extract assistant text from the LAST turn only.
