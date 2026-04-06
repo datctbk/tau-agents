@@ -417,6 +417,8 @@ class AgentToolExtension(Extension):
             return f"Error spawning sub-agent: {e}"
 
         def _run_sub_agent(assigned_task: str, target_task_id: str | None) -> str:
+            # Unique key so concurrent agents don't clobber each other's status
+            agent_key = f"agent:{persona or 'default'}:{id(sub)}"
             try:
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="running")
@@ -439,7 +441,7 @@ class AgentToolExtension(Extension):
                     parts.append(f"{elapsed}s")
                     return " | ".join(parts)
 
-                self._ext_context.set_spinner(_progress_msg())
+                self._ext_context.set_spinner(_progress_msg(), key=agent_key)
 
                 with sub:
                     events = []
@@ -449,11 +451,11 @@ class AgentToolExtension(Extension):
                             tool_count += 1
                             if hasattr(event, "call"):
                                 last_tool = getattr(event.call, "name", "")
-                            self._ext_context.set_spinner(_progress_msg())
+                            self._ext_context.set_spinner(_progress_msg(), key=agent_key)
                         elif type(event).__name__ == "TurnComplete":
                             turn_count += 1
                             last_tool = ""
-                            self._ext_context.set_spinner(_progress_msg())
+                            self._ext_context.set_spinner(_progress_msg(), key=agent_key)
 
                 # Extract assistant text from the LAST turn only.
                 text_parts: list[str] = []
@@ -487,13 +489,13 @@ class AgentToolExtension(Extension):
 
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="completed", result=result)
-                self._ext_context.set_spinner("")
+                self._ext_context.set_spinner("", key=agent_key)
                 return result
             except Exception as e:
                 err_msg = f"Sub-agent execution failed: {e}"
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="failed", error=err_msg)
-                self._ext_context.set_spinner("")
+                self._ext_context.set_spinner("", key=agent_key)
                 return err_msg
 
         if background:
