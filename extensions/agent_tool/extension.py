@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -406,7 +407,11 @@ class AgentToolExtension(Extension):
 
         # Spawn the sub-agent
         try:
+            # Optional override for background tasks so the main chat can keep
+            # using a large model while sub-agents use a lighter one.
+            bg_model_override = os.getenv("TAU_BG_MODEL", "").strip() if background else ""
             sub = self._ext_context.create_sub_session(
+                model=(bg_model_override or None),
                 system_prompt=resolved_prompt,
                 max_turns=resolved_max_turns,
                 session_name=f"sub-agent:{persona or 'default'}",
@@ -505,6 +510,7 @@ class AgentToolExtension(Extension):
         if background:
             task_name = f"Sub-agent ({persona or 'default'}): {task[:30]}..."
             tentry = self._task_registry.create(task_name)
+            bg_model_note = os.getenv("TAU_BG_MODEL", "").strip()
             
             # Start background thread
             t = threading.Thread(
@@ -519,7 +525,8 @@ class AgentToolExtension(Extension):
                 f"Agent spawned in background.\n"
                 f"Task ID: {tentry.id}\n"
                 f"Name: {tentry.name}\n"
-                f"Use 'task_get' with this ID to check its status."
+                f"Model: {bg_model_note}\n" if bg_model_note else ""
+            ) + "Use 'task_get' with this ID to check its status."
             )
         else:
             # Synchronous execution
