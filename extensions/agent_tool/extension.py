@@ -249,6 +249,9 @@ class AgentToolExtension(Extension):
                         type="boolean",
                         description=(
                             "If true, spawn the agent asynchronously and return a task_id immediately. "
+                            "Do NOT auto-poll status. Only use task_get when the USER explicitly asks for status/results. "
+                            "When background=true, after the tool call you should only relay the tool result lines and STOP. "
+                            "Do not add explanatory narration. "
                             "You can check on the agent later with task_get. "
                             "If false (default), block until the agent completes and return its full text response."
                         ),
@@ -302,7 +305,12 @@ class AgentToolExtension(Extension):
             ),
             ToolDefinition(
                 name="task_get",
-                description="Get detailed information about a specific task, including output or errors.",
+                description=(
+                    "Get detailed information about a specific task, including output or errors. "
+                    "Use ONLY when the user explicitly asks to check task status/results. "
+                    "Do not call this automatically after spawning a background task. "
+                    "Do not add narrative text unless the user asks for explanation."
+                ),
                 parameters={
                     "task_id": ToolParameter(
                         type="string",
@@ -424,6 +432,28 @@ class AgentToolExtension(Extension):
         def _run_sub_agent(assigned_task: str, target_task_id: str | None) -> str:
             # Unique key so concurrent agents don't clobber each other's status
             agent_key = f"agent:{persona or 'default'}:{id(sub)}"
+
+            def _notify_background(status: str, task_id: str, text: str) -> None:
+                if self._ext_context is None:
+                    return
+                preview = " ".join((text or "").strip().split())
+                if len(preview) > 220:
+                    preview = preview[:220] + "..."
+                if not preview:
+                    preview = "(no text output)"
+                if status == "completed":
+                    self._ext_context.print(
+                        f"\n✓ Background task {task_id} completed.\n"
+                        f"Preview: {preview}\n"
+                        f"Hint: run task_get {task_id} for full result.\n"
+                    )
+                else:
+                    self._ext_context.print(
+                        f"\n✗ Background task {task_id} failed.\n"
+                        f"Error: {preview}\n"
+                        f"Hint: run task_get {task_id} for details.\n"
+                    )
+
             try:
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="running")
@@ -486,6 +516,7 @@ class AgentToolExtension(Extension):
                 if last_error:
                     if target_task_id:
                         self._task_registry.update(target_task_id, status="failed", error=last_error)
+                        _notify_background("failed", target_task_id, last_error)
                     return last_error
 
                 result = "".join(text_parts).strip()
@@ -498,19 +529,20 @@ class AgentToolExtension(Extension):
 
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="completed", result=result)
+                    _notify_background("completed", target_task_id, result)
                 self._ext_context.set_spinner("", key=agent_key)
                 return result
             except Exception as e:
                 err_msg = f"Sub-agent execution failed: {e}"
                 if target_task_id:
                     self._task_registry.update(target_task_id, status="failed", error=err_msg)
+                    _notify_background("failed", target_task_id, err_msg)
                 self._ext_context.set_spinner("", key=agent_key)
                 return err_msg
 
         if background:
             task_name = f"Sub-agent ({persona or 'default'}): {task[:30]}..."
             tentry = self._task_registry.create(task_name)
-            bg_model_note = os.getenv("TAU_BG_MODEL", "").strip()
             
             # Start background thread
             t = threading.Thread(
@@ -520,13 +552,12 @@ class AgentToolExtension(Extension):
             )
             t.daemon = True
             t.start()
-            
+
             return (
                 f"Agent spawned in background.\n"
                 f"Task ID: {tentry.id}\n"
                 f"Name: {tentry.name}\n"
-                f"Model: {bg_model_note}\n" if bg_model_note else ""
-            ) + "Use 'task_get' with this ID to check its status."
+                "Use 'task_get' with this ID to check its status."
             )
         else:
             # Synchronous execution
