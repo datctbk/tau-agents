@@ -38,6 +38,8 @@ class TestTaskRegistryCreate:
         assert task.id
         assert task.name == "test task"
         assert task.status == "pending"
+        assert task.phase == "queued"
+        assert task.progress == 0
 
     def test_create_generates_unique_ids(self):
         reg = TaskRegistry()
@@ -126,7 +128,10 @@ class TestTaskEntryToDict:
         reg = TaskRegistry()
         task = reg.create("serialize me")
         d = task.to_dict()
-        assert set(d.keys()) == {"id", "name", "status", "created_at", "completed_at", "result", "error"}
+        assert set(d.keys()) == {
+            "id", "name", "status", "phase", "progress", "retries", "max_retries",
+            "parent_task_id", "child_task_ids", "created_at", "completed_at", "result", "error",
+        }
 
     def test_to_dict_truncates_long_result(self):
         entry = TaskEntry(id="x", name="big", result="A" * 500)
@@ -187,3 +192,42 @@ class TestTaskRegistryThreadSafety:
 
         assert not errors
         assert all(reg.get(t.id).status == "stopped" for t in tasks)
+
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+
+class TestTaskRegistryPersistence:
+    def test_persists_create_and_reload(self, tmp_path):
+        store = tmp_path / "tasks.json"
+        reg1 = TaskRegistry(store)
+        created = reg1.create("persist me")
+
+        reg2 = TaskRegistry(store)
+        found = reg2.get(created.id)
+        assert found is not None
+        assert found.name == "persist me"
+        assert found.status == "pending"
+
+    def test_persists_update(self, tmp_path):
+        store = tmp_path / "tasks.json"
+        reg1 = TaskRegistry(store)
+        created = reg1.create("update me")
+        reg1.update(created.id, status="completed", result="done")
+
+        reg2 = TaskRegistry(store)
+        found = reg2.get(created.id)
+        assert found is not None
+        assert found.status == "completed"
+        assert found.result == "done"
+
+    def test_set_storage_path_loads_existing(self, tmp_path):
+        store = tmp_path / "tasks.json"
+        reg1 = TaskRegistry(store)
+        created = reg1.create("hello")
+
+        reg2 = TaskRegistry()
+        assert reg2.get(created.id) is None
+        reg2.set_storage_path(store)
+        assert reg2.get(created.id) is not None

@@ -1,6 +1,7 @@
 """Tests for the AgentToolExtension — tools, slash commands, and handlers."""
 
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -89,11 +90,14 @@ class TestExtensionManifest:
 class TestToolsRegistration:
     def test_registers_tools(self, ext):
         tools = ext.tools()
-        assert len(tools) == 7
+        assert len(tools) == 9
 
     def test_tool_names(self, ext):
         names = {t.name for t in ext.tools()}
-        assert names == {"agent", "send_message", "task_create", "task_stop", "task_list", "task_get", "task_update"}
+        assert names == {
+            "agent", "send_message", "task_create", "task_stop", "task_list",
+            "task_get", "task_update", "task_events", "task_events_clear",
+        }
 
     def test_agent_tool_has_required_params(self, ext):
         agent_tool = next(t for t in ext.tools() if t.name == "agent")
@@ -275,6 +279,22 @@ class TestAgentHandler:
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
 
+    @patch("threading.Thread")
+    def test_background_agent_registers_cancel_token(self, mock_thread, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt.return_value = [TextDelta("ok")]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        result = ext._handle_agent(task="test", background=True)
+        task_id_line = next(line for line in result.splitlines() if line.startswith("Task ID:"))
+        task_id = task_id_line.split(":", 1)[1].strip()
+
+        ev = ext._get_cancel_token(task_id)
+        assert ev is not None
+        assert ev.is_set() is False
+
 
 # ---------------------------------------------------------------------------
 # SendMessage handler
@@ -310,6 +330,24 @@ class TestTaskHandlers:
         task_id = json.loads(create_result)["id"]
         result = ext._handle_task_stop(task_id=task_id)
         assert "stopped" in result.lower()
+
+    @patch("threading.Thread")
+    def test_task_stop_signals_background_cancel(self, mock_thread, ext):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt.return_value = [TextDelta("ok")]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        spawn_result = ext._handle_agent(task="test", background=True)
+        task_id_line = next(line for line in spawn_result.splitlines() if line.startswith("Task ID:"))
+        task_id = task_id_line.split(":", 1)[1].strip()
+
+        stop_result = ext._handle_task_stop(task_id)
+        assert "stopped" in stop_result.lower()
+        ev = ext._get_cancel_token(task_id)
+        assert ev is not None
+        assert ev.is_set() is True
 
     def test_task_stop_nonexistent(self, ext):
         result = ext._handle_task_stop(task_id="fake-id")
@@ -370,6 +408,75 @@ class TestTaskHandlers:
         assert t.result == "done stuff"
         assert t.completed_at is not None
 
+    def test_task_events_stream_and_clear(self, ext):
+        task_id = json.loads(ext._handle_task_create("evt"))["id"]
+        ext._handle_task_update(task_id, status="running")
+        ext._handle_task_update(task_id, status="completed")
+
+        events = json.loads(ext._handle_task_events())
+        assert len(events) >= 3
+        assert all("seq" in e for e in events)
+        assert any(e["type"] == "task.created" for e in events)
+        assert any(e["type"] in ("task.started", "task.updated") for e in events)
+        assert any(e["type"] == "task.completed" for e in events)
+
+        last_seq = events[-1]["seq"]
+        delta = json.loads(ext._handle_task_events(since_seq=last_seq))
+        assert delta == []
+
+        cleared = json.loads(ext._handle_task_events_clear())
+        assert cleared["cleared"] >= 1
+        assert json.loads(ext._handle_task_events()) == []
+
+    @patch("threading.Thread")
+    def test_background_child_links_to_parent(self, mock_thread, ext):
+        parent_id = json.loads(ext._handle_task_create("parent"))["id"]
+
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.prompt.return_value = [TextDelta("ok")]
+        ext._ext_context.create_sub_session.return_value = mock_session
+
+        spawn_result = ext._handle_agent(
+            task="child task",
+            background=True,
+            parent_task_id=parent_id,
+        )
+        child_id_line = next(line for line in spawn_result.splitlines() if line.startswith("Task ID:"))
+        child_id = child_id_line.split(":", 1)[1].strip()
+
+        parent = ext._task_registry.get(parent_id)
+        child = ext._task_registry.get(child_id)
+        assert parent is not None
+        assert child is not None
+        assert child.parent_task_id == parent_id
+        assert child_id in parent.child_task_ids
+
+    def test_parent_aggregates_child_progress_and_status(self, ext):
+        parent_id = json.loads(ext._handle_task_create("parent"))["id"]
+        c1 = json.loads(ext._handle_task_create("child1"))["id"]
+        c2 = json.loads(ext._handle_task_create("child2"))["id"]
+
+        assert ext._link_parent_child(parent_id, c1) is True
+        assert ext._link_parent_child(parent_id, c2) is True
+
+        ext._update_task(c1, status="running", phase="running", progress=40)
+        ext._update_task(c2, status="pending", phase="queued", progress=0)
+
+        parent = ext._task_registry.get(parent_id)
+        assert parent is not None
+        assert parent.status == "running"
+        assert parent.progress == 20
+
+        ext._update_task(c1, status="completed", phase="completed", progress=100, completed_at=1.0)
+        ext._update_task(c2, status="completed", phase="completed", progress=100, completed_at=1.0)
+
+        parent = ext._task_registry.get(parent_id)
+        assert parent is not None
+        assert parent.status == "completed"
+        assert parent.progress == 100
+
 
 # ---------------------------------------------------------------------------
 # on_load
@@ -389,3 +496,36 @@ class TestOnLoad:
         # Should have loaded at least the 3 built-in personas
         assert len(ext._personas) >= 3
         assert "explore" in ext._personas
+
+    def test_on_load_wires_task_storage(self, tmp_path):
+        ext1 = AgentToolExtension()
+        ctx1 = MagicMock()
+        ctx1._agent_config = MagicMock()
+        ctx1._agent_config.workspace_root = str(tmp_path)
+        ext1.on_load(ctx1)
+        created_json = ext1._handle_task_create(name="persisted task")
+        task_id = json.loads(created_json)["id"]
+
+        ext2 = AgentToolExtension()
+        ctx2 = MagicMock()
+        ctx2._agent_config = MagicMock()
+        ctx2._agent_config.workspace_root = str(tmp_path)
+        ext2.on_load(ctx2)
+
+        loaded = ext2._task_registry.get(task_id)
+        assert loaded is not None
+        assert loaded.name == "persisted task"
+
+
+class TestSchedulerControls:
+    def test_scheduler_env_config(self):
+        with patch.dict(os.environ, {"TAU_BG_MAX_CONCURRENT": "3", "TAU_BG_QUEUE_POLICY": "lifo"}, clear=False):
+            ext = AgentToolExtension()
+            assert ext._bg_max_concurrent == 3
+            assert ext._bg_queue_policy == "lifo"
+
+    def test_scheduler_env_defaults_on_invalid(self):
+        with patch.dict(os.environ, {"TAU_BG_MAX_CONCURRENT": "bad", "TAU_BG_QUEUE_POLICY": "weird"}, clear=False):
+            ext = AgentToolExtension()
+            assert ext._bg_max_concurrent == 1
+            assert ext._bg_queue_policy == "fifo"
