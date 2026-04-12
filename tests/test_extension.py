@@ -516,6 +516,29 @@ class TestOnLoad:
         assert loaded is not None
         assert loaded.name == "persisted task"
 
+    def test_on_load_reconciles_orphaned_running_tasks(self, tmp_path):
+        ext1 = AgentToolExtension()
+        ctx1 = MagicMock()
+        ctx1._agent_config = MagicMock()
+        ctx1._agent_config.workspace_root = str(tmp_path)
+        ext1.on_load(ctx1)
+
+        task_id = json.loads(ext1._handle_task_create(name="orphaned"))["id"]
+        ext1._handle_task_update(task_id, status="running")
+
+        ext2 = AgentToolExtension()
+        ctx2 = MagicMock()
+        ctx2._agent_config = MagicMock()
+        ctx2._agent_config.workspace_root = str(tmp_path)
+        ext2.on_load(ctx2)
+
+        reconciled = ext2._task_registry.get(task_id)
+        assert reconciled is not None
+        assert reconciled.status == "failed"
+        assert reconciled.phase == "interrupted"
+        assert reconciled.error is not None
+        assert "restarted" in reconciled.error.lower()
+
 
 class TestSchedulerControls:
     def test_scheduler_env_config(self):

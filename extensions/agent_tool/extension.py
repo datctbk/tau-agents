@@ -582,6 +582,24 @@ class AgentToolExtension(Extension):
             self._refresh_parent_chain(task_id)
         return ok
 
+    def _reconcile_orphaned_tasks_on_startup(self) -> None:
+        """Finalize tasks that cannot continue after process restart.
+
+        Background agents run as in-process threads. After tau exits, those
+        workers are gone, so persisted pending/running tasks from a prior run
+        must be marked interrupted to avoid an infinite "running" state.
+        """
+        for t in self._task_registry.list_all():
+            if t.status in ("pending", "running"):
+                self._update_task(
+                    t.id,
+                    status="failed",
+                    phase="interrupted",
+                    progress=min(99, max(0, t.progress)),
+                    error="Task interrupted: tau process restarted before completion.",
+                    completed_at=time.time(),
+                )
+
     def on_load(self, context: ExtensionContext) -> None:
         self._ext_context = context
         workspace = "."
@@ -589,6 +607,7 @@ class AgentToolExtension(Extension):
             workspace = getattr(context._agent_config, "workspace_root", ".") or "."
         storage_path = Path(workspace) / ".tau" / "agents" / "tasks.json"
         self._task_registry.set_storage_path(storage_path)
+        self._reconcile_orphaned_tasks_on_startup()
         self._personas = _load_built_in_agents()
         if self._personas:
             logger.debug("Loaded %d agent personas: %s", len(self._personas), list(self._personas.keys()))
