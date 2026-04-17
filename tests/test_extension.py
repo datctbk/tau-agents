@@ -325,6 +325,18 @@ class TestTaskHandlers:
         assert data["status"] == "pending"
         assert "id" in data
 
+    def test_task_transition_emits_unified_event(self, ext, tmp_path):
+        ext._workspace_root = str(tmp_path)
+        task_id = json.loads(ext._handle_task_create(name="evt task"))["id"]
+        ext._handle_task_update(task_id, status="running")
+
+        evt_file = tmp_path / ".tau" / "events" / "assistant-events.jsonl"
+        assert evt_file.exists()
+        txt = evt_file.read_text(encoding="utf-8")
+        assert '"family": "task"' in txt
+        assert '"name": "task.created"' in txt
+        assert '"name": "task.started"' in txt
+
     def test_task_stop_existing(self, ext):
         create_result = ext._handle_task_create(name="stoppable")
         task_id = json.loads(create_result)["id"]

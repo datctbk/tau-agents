@@ -38,6 +38,7 @@ from tau.core.types import (
     TurnComplete,
     ErrorEvent,
 )
+from tau.core.assistant_events import append_assistant_event, make_assistant_event
 
 if TYPE_CHECKING:
     pass
@@ -389,6 +390,7 @@ class AgentToolExtension(Extension):
 
     def __init__(self) -> None:
         self._ext_context: ExtensionContext | None = None
+        self._workspace_root: str = "."
         self._task_registry = TaskRegistry()
         raw_max_events = os.getenv("TAU_BG_EVENT_BUFFER", "1000").strip()
         try:
@@ -579,6 +581,22 @@ class AgentToolExtension(Extension):
                     task=cur,
                     error=cur.error,
                 )
+                append_assistant_event(
+                    self._workspace_root,
+                    make_assistant_event(
+                        family="task",
+                        name=event_type,
+                        payload={
+                            "task_id": cur.id,
+                            "status": cur.status,
+                            "phase": cur.phase,
+                            "progress": cur.progress,
+                            "parent_task_id": cur.parent_task_id,
+                            "error": cur.error,
+                        },
+                        severity="error" if cur.status == "failed" else "info",
+                    ),
+                )
             self._refresh_parent_chain(task_id)
         return ok
 
@@ -605,6 +623,7 @@ class AgentToolExtension(Extension):
         workspace = "."
         if hasattr(context, "_agent_config") and context._agent_config:
             workspace = getattr(context._agent_config, "workspace_root", ".") or "."
+        self._workspace_root = workspace
         storage_path = Path(workspace) / ".tau" / "agents" / "tasks.json"
         self._task_registry.set_storage_path(storage_path)
         self._reconcile_orphaned_tasks_on_startup()
@@ -1091,6 +1110,20 @@ class AgentToolExtension(Extension):
     def _handle_task_create(self, name: str) -> str:
         task = self._task_registry.create(name)
         self._events.emit(event_type="task.created", task=task)
+        append_assistant_event(
+            self._workspace_root,
+            make_assistant_event(
+                family="task",
+                name="task.created",
+                payload={
+                    "task_id": task.id,
+                    "status": task.status,
+                    "phase": task.phase,
+                    "progress": task.progress,
+                },
+                severity="info",
+            ),
+        )
         return json.dumps(task.to_dict(), indent=2)
 
     def _handle_task_stop(self, task_id: str) -> str:
