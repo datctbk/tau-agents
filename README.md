@@ -2,7 +2,7 @@
 
 Multi-agent orchestration extension for [tau](https://github.com/datctbk/tau).
 
-Spawn sub-agents, delegate tasks, and coordinate workflows — all as a lightweight package that keeps tau's core untouched.
+Use `tau-agents` when you want bounded delegation and background task tracking without increasing tau core complexity.
 
 ## Install
 
@@ -50,3 +50,10 @@ The `agent` tool is available to the LLM automatically. The model can delegate w
 
 ```
 User: Refactor the authentication module
+```
+
+## Notes
+
+- Keep delegated tasks concrete and bounded.
+- Prefer read-only personas (`explore`) for investigation and `verify` for checks.
+- Use parent session task tracking (`task_create`/`task_stop`) for visibility.
